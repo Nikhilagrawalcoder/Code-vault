@@ -1,0 +1,201 @@
+name: Night LinkedIn Post (Playwright Edition)
+
+on:
+  schedule:
+    - cron: "30 16 * * *"
+  workflow_dispatch:
+
+jobs:
+  generate-post:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.GROQ_API_KEY }}" ]; then
+            echo "Missing GROQ_API_KEY"
+            exit 1
+          fi
+
+      - name: Get git diff
+        run: |
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            git diff HEAD~1 > diff.txt
+          else
+            echo "Initial commit - no changes" > diff.txt
+          fi
+
+      - name: Trim diff
+        run: head -200 diff.txt > diff_trimmed.txt
+
+      # 📊 Metrics
+      - name: Calculate metrics
+        run: |
+          echo "FILES_CHANGED=$(git diff --name-only HEAD~1 | wc -l)" >> $GITHUB_ENV
+          echo "LINES_ADDED=$(grep '^+' diff_trimmed.txt | wc -l)" >> $GITHUB_ENV
+          echo "LINES_REMOVED=$(grep '^-' diff_trimmed.txt | wc -l)" >> $GITHUB_ENV
+
+      # 🧠 Install Python + Playwright
+      - name: Install dependencies
+        run: |
+          pip install groq playwright
+          playwright install --with-deps
+
+      # 🎨 Generate HTML (premium UI)
+      - name: Create HTML template
+        run: |
+          cat <<EOF > template.html
+          <html>
+          <head>
+          <meta charset="UTF-8">
+          <style>
+            body {
+              margin: 0;
+              background: #0d1117;
+              color: #c9d1d9;
+              font-family: 'Segoe UI', sans-serif;
+            }
+            .container {
+              padding: 40px;
+              max-width: 900px;
+              margin: auto;
+            }
+            .card {
+              background: #161b22;
+              border-radius: 16px;
+              padding: 24px;
+              box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            }
+            h2 {
+              color: #58a6ff;
+              margin-bottom: 10px;
+            }
+            .metrics {
+              font-size: 14px;
+              margin-bottom: 20px;
+              color: #8b949e;
+            }
+            .add { color: #3fb950; }
+            .remove { color: #f85149; }
+            pre {
+              background: #0d1117;
+              padding: 16px;
+              border-radius: 10px;
+              overflow-x: auto;
+              font-size: 13px;
+              line-height: 1.5;
+            }
+          </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="card">
+                <h2>🚀 Today's Code Changes</h2>
+                <div class="metrics">
+                  📁 Files: $FILES_CHANGED |
+                  ➕ <span class="add">$LINES_ADDED</span> |
+                  ➖ <span class="remove">$LINES_REMOVED</span>
+                </div>
+                <pre>
+          $(cat diff_trimmed.txt)
+                </pre>
+              </div>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      # 📸 Screenshot using Playwright
+      - name: Generate screenshot with Playwright
+        run: |
+          python3 << 'PYEOF'
+          from playwright.sync_api import sync_playwright
+          import os
+
+          html_path = "file://" + os.path.abspath("template.html")
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page(viewport={"width": 1000, "height": 1200})
+              page.goto(html_path)
+              page.wait_for_timeout(1000)
+              page.screenshot(path="diff.png", full_page=True)
+              browser.close()
+          PYEOF
+
+      # 🤖 Generate LinkedIn Post
+      - name: Generate LinkedIn Post
+        run: |
+          python3 << 'PYEOF'
+          import os
+          from groq import Groq
+
+          with open('diff_trimmed.txt') as f:
+              diff = f.read()
+
+          files = os.environ.get("FILES_CHANGED", "0")
+          added = os.environ.get("LINES_ADDED", "0")
+          removed = os.environ.get("LINES_REMOVED", "0")
+
+          client = Groq(api_key=os.environ['GROQ_API_KEY'])
+
+          prompt = f"""
+          Act as a top 1% engineer building in public.
+
+          Write a VIRAL LinkedIn post.
+
+          Data:
+          - Files changed: {files}
+          - Lines added: {added}
+          - Lines removed: {removed}
+
+          Code:
+          {diff}
+
+          Requirements:
+          - Strong hook
+          - Clear explanation
+          - Mention screenshot
+          - Add insight
+          - Add CTA
+          """
+
+          response = client.chat.completions.create(
+              model="llama-3.3-70b-versatile",
+              messages=[
+                  {"role": "system", "content": "You write viral dev content."},
+                  {"role": "user", "content": prompt}
+              ],
+              temperature=0.7,
+              max_tokens=800
+          )
+
+          post = response.choices[0].message.content
+
+          with open("post.txt", "w") as f:
+              f.write(post)
+
+          print("Post generated")
+          PYEOF
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+
+      # 📤 Show output
+      - name: Show LinkedIn Post
+        run: |
+          echo "===== LINKEDIN POST ====="
+          cat post.txt
+
+      # 📦 Upload artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkedin-playwright-assets
+          path: |
+            post.txt
+            diff.png
